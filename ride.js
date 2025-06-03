@@ -1,4 +1,4 @@
-// ride.js - Full file with Firebase Group Tracking (Sending & Receiving Locations)
+// ride.js - Live API-Assisted Altitude Correction
 
 document.addEventListener('DOMContentLoaded', function() {
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
@@ -36,14 +36,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const resumeSimButton = document.getElementById('resumeSimButton'); 
     const stopSimButton = document.getElementById('stopSimButton');
 
-    // Group Tracking DOM Elements
     const roomNameInput = document.getElementById('roomName');
     const displayNameInput = document.getElementById('displayName');
     const consentLocationShareCheckbox = document.getElementById('consentLocationShare');
     const joinRoomButton = document.getElementById('joinRoomButton');
     const leaveRoomButton = document.getElementById('leaveRoomButton');
     const groupStatusEl = document.getElementById('groupStatus');
-
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     // 2. RIDE STATE VARIABLES
@@ -55,12 +53,13 @@ document.addEventListener('DOMContentLoaded', function() {
     let activeSegmentStartTime = 0;
     let totalElapsedTimeMs = 0;
     let totalDistanceKm = 0;
-    let currentAltitudeM = null;
-    let previousAltitudeM = null;
+    let currentAltitudeM = null; 
+    let previousAltitudeM = null; 
+    let rawGpsAltitudeM = null; 
     let currentSpeedKmh = 0;
     let currentCadenceRpm = 0; 
     let powerReadings = [];
-    let previousTimestamp = null; 
+    let previousTickPerformanceTimestamp = null; 
     let previousLatitude = null;
     let previousLongitude = null;
     let previousSpeedMsForSim = 0; 
@@ -92,16 +91,20 @@ document.addEventListener('DOMContentLoaded', function() {
     let sensorCadenceRpm = null; 
     let currentGearRatio = null; 
 
-    // Group Tracking State
     let currentRoomName = null;
     let currentUserDisplayName = null;
     let currentUserId = null; 
     let sendLocationToGroupInterval = null;
-    const GROUP_LOCATION_SEND_INTERVAL_MS = 10000; // Send location every 10 seconds
-    let groupMembersListener = null; // To store the Firestore listener unsubscribe function
-    let groupMembers = {}; // Stores { userId: {displayName, lat, lon, marker, lastSeen} }
+    const GROUP_LOCATION_SEND_INTERVAL_MS = 10000; 
+    let groupMembersListener = null; 
+    let groupMembers = {};
 
-    // Firebase services (initialized in HTML via SDK)
+    let apiCorrectedAltitudeM = null; 
+    let lastAltitudeApiCallTimestamp = 0;
+    const ALTITUDE_API_CALL_INTERVAL_MS = 10000; 
+    let altitudeApiCallInProgress = false;
+
+    // Firebase services
     const auth = firebase.auth();
     const db = firebase.firestore();
 
@@ -213,7 +216,41 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 6. POWER CALCULATION FUNCTIONS
+    // 6. LIVE ALTITUDE CORRECTION API FUNCTION
+    // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+    async function fetchLiveAltitudeCorrection(latitude, longitude) {
+        if (latitude === null || longitude === null || altitudeApiCallInProgress) {
+            return; 
+        }
+        altitudeApiCallInProgress = true;
+        console.log(`Fetching live altitude for: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`);
+        // Using a simple elevation API, Open-Meteo also offers this.
+        const apiUrl = `https://api.open-meteo.com/v1/elevation?latitude=${latitude.toFixed(4)}&longitude=${longitude.toFixed(4)}`;
+
+        try {
+            const response = await fetch(apiUrl);
+            if (!response.ok) {
+                throw new Error(`Live Elevation API HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            if (data.elevation && data.elevation.length > 0) {
+                apiCorrectedAltitudeM = parseFloat(data.elevation[0]);
+                console.log(`Live API Corrected Altitude: ${apiCorrectedAltitudeM.toFixed(1)}m`);
+            } else {
+                console.warn("Live elevation data not found in API response:", data);
+                // If API fails or returns no data, apiCorrectedAltitudeM remains null or its old value
+                // The app will then fallback to rawGpsAltitudeM in processPositionUpdate
+            }
+        } catch (error) {
+            console.error("Error fetching live altitude correction:", error);
+        } finally {
+            altitudeApiCallInProgress = false;
+            lastAltitudeApiCallTimestamp = performance.now(); 
+        }
+    }
+
+    // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+    // 7. POWER CALCULATION FUNCTIONS
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     function calculateRollingResistancePower(currentSpeedMs, massKg, crr, gradientDecimal) {
         if (currentSpeedMs < 0.1) return 0;
@@ -262,9 +299,11 @@ document.addEventListener('DOMContentLoaded', function() {
         const speedMs = data.speedKmh / 3.6;
         const prevSpeedMs = data.previousSpeedKmh / 3.6; 
         const timeDeltaS = data.timeDeltaS;
-        const currentAlt = data.altitudeM !== null ? data.altitudeM : (data.previousAltitudeM || 0);
-        const prevAlt = data.previousAltitudeM !== null ? data.previousAltitudeM : currentAlt;
-        const altitudeChangeM = currentAlt - prevAlt;
+        
+        const currentCalcAltitude = data.altitudeM !== null ? data.altitudeM : (data.previousAltitudeM || 0);
+        const prevCalcAltitude = data.previousAltitudeM !== null ? data.previousAltitudeM : currentCalcAltitude;
+        const altitudeChangeM = currentCalcAltitude - prevCalcAltitude;
+
         const avgSpeedMsForTickHorizontal = (speedMs + prevSpeedMs) / 2;
         let distanceHorizontalM = avgSpeedMsForTickHorizontal * timeDeltaS;
         let gradientDecimal = 0;
@@ -275,6 +314,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         gradientDecimal = Math.max(-0.30, Math.min(0.30, gradientDecimal));
         data.gradientPercent = gradientDecimal * 100;
+
         let pRolling = calculateRollingResistancePower(speedMs, settings.systemMass, settings.crr, gradientDecimal);
         let pAero = calculateAerodynamicPower(
             speedMs, data.bikeBearingDegrees, data.windSpeedMs, data.windDirectionDegrees,
@@ -290,9 +330,9 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 7. WEB BLUETOOTH FUNCTIONS
+    // 8. WEB BLUETOOTH FUNCTIONS
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    const CSC_SERVICE_UUID = 'cycling_speed_and_cadence';
+    const CSC_SERVICE_UUID = 'cycling_speed_and_cadence'; 
     const CSC_MEASUREMENT_UUID = 'csc_measurement';
     async function connectSpeedCadenceDevice() {
         if (!navigator.bluetooth) {
@@ -396,7 +436,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 8. MAP FUNCTIONS
+    // 9. MAP FUNCTIONS
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     function initializeMap(lat, lon) {
         if (map) { 
@@ -437,37 +477,65 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 9. GPS POSITION PROCESSING & DATA UPDATE
+    // 10. GPS POSITION PROCESSING & DATA UPDATE
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     function processPositionUpdate(position) {
         if (isPaused && isRunning) return; 
         if (!isRunning) return; 
 
-        const currentEventTimestamp = position.timestamp || performance.now();
-        lastProcessedDataTimestamp = performance.now();
+        const currentTickPerformanceTimestamp = performance.now();
+        const previousProcessedTime = lastProcessedDataTimestamp; 
+        lastProcessedDataTimestamp = currentTickPerformanceTimestamp; // Update for failsafe ticker
 
         let timeDeltaS = 0;
-        if (previousTimestamp !== null) {
-            timeDeltaS = (currentEventTimestamp - previousTimestamp) / 1000;
+        if (previousTickPerformanceTimestamp !== null) { // Use performance timestamp for delta
+            timeDeltaS = (currentTickPerformanceTimestamp - previousTickPerformanceTimestamp) / 1000;
         }
         
-        if (timeDeltaS < 0.05 && previousTimestamp !== null && !position.synthetic) { 
+        if (timeDeltaS < 0.05 && previousTickPerformanceTimestamp !== null && !position.synthetic) { 
              if (currentLatitude === position.coords.latitude && currentLongitude === position.coords.longitude && 
-                 currentAltitudeM === position.coords.altitude &&
+                 rawGpsAltitudeM === position.coords.altitude &&
                  (position.coords.speed !== null ? (position.coords.speed * 3.6) : 0) === currentSpeedKmh ) {
-                previousTimestamp = currentEventTimestamp; 
-                return; 
+                // No significant change, only update previousTickPerformanceTimestamp if we decide to skip full processing
+                // For now, we proceed but timeDeltaS might be small.
+                // previousTickPerformanceTimestamp = currentTickPerformanceTimestamp; 
+                // return; 
             }
+             if (timeDeltaS <=0) timeDeltaS = 0.05; // Force small positive delta if data changed but time didn't
         }
-        if (timeDeltaS <= 0 && !position.synthetic) { timeDeltaS = 0.05; }
-        if (position.synthetic && timeDeltaS <=0) { timeDeltaS = 1.0; }
+        if (position.synthetic && (timeDeltaS <= 0 || timeDeltaS > 1.5)) { // Synthetic ticks should be ~1s
+            timeDeltaS = 1.0; 
+        }
+        if (timeDeltaS <=0) timeDeltaS = 1.0; // Final fallback for timeDeltaS
         
         if (timeDeltaS > 0) { totalElapsedTimeMs += (timeDeltaS * 1000); }
-        previousTimestamp = currentEventTimestamp; 
+        previousTickPerformanceTimestamp = currentTickPerformanceTimestamp; 
 
         const newLatitude = position.synthetic ? currentLatitude : position.coords.latitude;
         const newLongitude = position.synthetic ? currentLongitude : position.coords.longitude;
-        const newAltitude = position.synthetic ? currentAltitudeM : position.coords.altitude;
+        const gpsProvidedAltitude = position.synthetic ? rawGpsAltitudeM : position.coords.altitude; 
+        
+        if (gpsProvidedAltitude !== null) rawGpsAltitudeM = gpsProvidedAltitude;
+
+        if (isRunning && !isPaused && newLatitude !== null && newLongitude !== null &&
+            (performance.now() - lastAltitudeApiCallTimestamp) > ALTITUDE_API_CALL_INTERVAL_MS) {
+            fetchLiveAltitudeCorrection(newLatitude, newLongitude);
+        }
+
+        let altitudeToUse = currentAltitudeM; 
+        if (apiCorrectedAltitudeM !== null) { 
+            altitudeToUse = apiCorrectedAltitudeM;
+            // Consider if apiCorrectedAltitudeM should be 'used once' then nulled, or if it persists until next API call.
+            // For now, it persists.
+        } else if (rawGpsAltitudeM !== null) { 
+            altitudeToUse = rawGpsAltitudeM;
+        } else if (currentAltitudeM === null) { 
+            altitudeToUse = 100; 
+        }
+        
+        const tempPrevCalcAltitude = previousAltitudeM === null ? altitudeToUse : previousAltitudeM;
+        // Update currentAltitudeM (global) that will be used for THIS tick's calculations
+        currentAltitudeM = altitudeToUse;     
 
         if (newLatitude !== null && newLongitude !== null) {
             updateMap(newLatitude, newLongitude);
@@ -479,11 +547,9 @@ document.addEventListener('DOMContentLoaded', function() {
             currentBikeBearingDegrees = calculateBearing(currentLatitude, currentLongitude, newLatitude, newLongitude);
         }
         
+        // Update global current lat/lon AFTER using them as "previous" for bearing
         if (newLatitude !== null) currentLatitude = newLatitude;
         if (newLongitude !== null) currentLongitude = newLongitude;
-        
-        if (previousAltitudeM === null && newAltitude !== null) { previousAltitudeM = newAltitude; }
-        currentAltitudeM = newAltitude !== null ? newAltitude : (currentAltitudeM !== null ? currentAltitudeM : 100);
         
         let gpsSpeedMs = position.coords && position.coords.speed !== null ? position.coords.speed : 0;
         if (position.synthetic) gpsSpeedMs = 0;
@@ -517,16 +583,17 @@ document.addEventListener('DOMContentLoaded', function() {
             totalDistanceKm += distanceThisTickKm;
         }
 
-        if(currentLatitude !== null) previousLatitude = currentLatitude;
-        if(currentLongitude !== null) previousLongitude = currentLongitude;
+        // Update previousLat/Lon for next Haversine using the now current values
+        previousLatitude = currentLatitude; // These were updated from newLatitude
+        previousLongitude = currentLongitude;
 
         const powerData = {
             speedKmh: currentSpeedKmh,
             previousSpeedKmh: previousSpeedMsForSim * 3.6,
-            altitudeM: currentAltitudeM,
-            previousAltitudeM: previousAltitudeM !== null ? previousAltitudeM : currentAltitudeM,
+            altitudeM: currentAltitudeM, 
+            previousAltitudeM: tempPrevCalcAltitude, 
             cadenceRpm: currentCadenceRpm,
-            timeDeltaS: timeDeltaS > 0 ? timeDeltaS : 1.0, 
+            timeDeltaS: timeDeltaS, 
             gradientPercent: 0,
             bikeBearingDegrees: currentBikeBearingDegrees,
             windSpeedMs: currentWindSpeedMs,
@@ -535,8 +602,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const currentPowerW = calculateTotalPower(powerData);
         
         previousSpeedMsForSim = currentSpeedKmh / 3.6; 
-        if (newAltitude !== null && !position.synthetic) { previousAltitudeM = newAltitude; } 
-        else if (position.synthetic) { previousAltitudeM = currentAltitudeM; }
+        previousAltitudeM = currentAltitudeM; // The altitude used in this tick becomes previous for next
 
         if (isRunning && !isPaused) { powerReadings.push(currentPowerW); }
         
@@ -544,12 +610,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
         rideDataLog.push({
             timestamp: Math.floor(totalElapsedTimeMs / 1000),
-            abs_timestamp_gps: position.timestamp || null,
+            abs_timestamp_gps: position.timestamp || null, 
+            perf_timestamp_event: currentTickPerformanceTimestamp, 
+            time_delta_s: timeDeltaS.toFixed(3), 
             velocity: currentSpeedKmh.toFixed(1),
             power: Math.round(currentPowerW),
             x_longitude: currentLongitude !== null ? currentLongitude.toFixed(5) : "N/A",
             y_latitude: currentLatitude !== null ? currentLatitude.toFixed(5) : "N/A",
-            z_altitude: currentAltitudeM !== null ? currentAltitudeM.toFixed(1) : "N/A",
+            z_altitude_raw_gps: rawGpsAltitudeM !== null ? rawGpsAltitudeM.toFixed(1) : "N/A",
+            z_altitude_used: currentAltitudeM !== null ? currentAltitudeM.toFixed(1) : "N/A",
             gradient: powerData.gradientPercent === undefined ? "N/A" : powerData.gradientPercent.toFixed(1),
             cadence: currentCadenceRpm,
             gps_accuracy: position.coords && position.coords.accuracy !== null ? position.coords.accuracy.toFixed(1) : "N/A",
@@ -577,7 +646,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 10. DISPLAY UPDATE
+    // 11. DISPLAY UPDATE
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     function updateDisplay(currentP, currentGrad) {
         currentSpeedEl.textContent = currentSpeedKmh.toFixed(1);
@@ -614,7 +683,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 11. SCREEN WAKE LOCK & PAGE VISIBILITY API
+    // 12. SCREEN WAKE LOCK & PAGE VISIBILITY API
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     async function requestWakeLock() {
         if (!('wakeLock' in navigator)) { console.log('WakeLock API not supported.'); return; }
@@ -662,7 +731,7 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 12. FAILSAFE TICKER
+    // 13. FAILSAFE TICKER
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     function ensurePeriodicUpdate() {
         if (!isRunning || isPaused) { return; }
@@ -672,16 +741,24 @@ document.addEventListener('DOMContentLoaded', function() {
             const syntheticPosition = {
                 coords: {
                     latitude: currentLatitude, longitude: currentLongitude,
-                    altitude: currentAltitudeM, speed: 0, accuracy: null                
+                    altitude: currentAltitudeM, // Use current (potentially API-assisted) altitude for synthetic tick
+                    speed: 0, accuracy: null                
                 },
-                timestamp: now, synthetic: true 
+                timestamp: currentTimestampForTick(), // Use consistent timestamping
+                synthetic: true 
             };
             processPositionUpdate(syntheticPosition); 
         }
     }
+    // Helper for consistent timestamping in synthetic ticks
+    function currentTimestampForTick() {
+        return previousTickPerformanceTimestamp !== null ? 
+               previousTickPerformanceTimestamp + 1000 // Assume 1s tick for synthetic
+               : performance.now();
+    }
     
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 13. POST-RIDE ELEVATION CORRECTION & RECALCULATION
+    // 14. POST-RIDE ELEVATION CORRECTION & RECALCULATION
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     async function fetchCorrectedElevations(logData) {
         if (!logData || logData.length === 0) return null;
@@ -721,16 +798,16 @@ document.addEventListener('DOMContentLoaded', function() {
         for (let i = 0; i < correctedLog.length; i++) {
             if (correctedLog[i].y_latitude !== "N/A" && correctedLog[i].x_longitude !== "N/A") {
                 if (elevationApiIndex < correctedElevations.length) {
-                    correctedLog[i].z_altitude_corrected = parseFloat(correctedElevations[elevationApiIndex]).toFixed(1);
-                    correctedLog[i].altitude_source = "API";
+                    correctedLog[i].z_altitude_corrected_api = parseFloat(correctedElevations[elevationApiIndex]).toFixed(1);
+                    correctedLog[i].altitude_source_final = "API_Post";
                     elevationApiIndex++;
                 } else {
-                     correctedLog[i].altitude_source = "GPS (API data short)";
-                     correctedLog[i].z_altitude_corrected = correctedLog[i].z_altitude;
+                     correctedLog[i].altitude_source_final = "GPS (API data short)";
+                     correctedLog[i].z_altitude_corrected_api = correctedLog[i].z_altitude_used; 
                 }
             } else {
-                correctedLog[i].altitude_source = "GPS (Invalid Coords)";
-                correctedLog[i].z_altitude_corrected = correctedLog[i].z_altitude;
+                correctedLog[i].altitude_source_final = "GPS (Invalid Coords)";
+                correctedLog[i].z_altitude_corrected_api = correctedLog[i].z_altitude_used; 
             }
         }
         if(statusEl) statusEl.textContent = "Elevation data corrected.";
@@ -742,27 +819,27 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log("Recalculating metrics with corrected elevation...");
         if(statusEl) statusEl.textContent = "Recalculating power...";
         let recalculatedLog = JSON.parse(JSON.stringify(logDataWithCorrectedAlt));
-        let newPowerReadings = [];
+        let newPowerReadingsCorrected = [];
         let totalAscentM = 0;
         let totalDescentM = 0;
-        let prevCorrectedAlt = null;
+        let prevCorrectedAltForRecalc = null;
 
         for (let i = 0; i < recalculatedLog.length; i++) {
             const currentPoint = recalculatedLog[i];
-            const currentAlt = parseFloat(currentPoint.z_altitude_corrected || currentPoint.z_altitude);
-            let timeDeltaS = 1.0; 
+            const currentAltForRecalc = parseFloat(currentPoint.z_altitude_corrected_api || currentPoint.z_altitude_used);
+            let timeDeltaSRecalc = 1.0; 
             if (i > 0) {
                 const prevPoint = recalculatedLog[i-1];
-                prevCorrectedAlt = parseFloat(prevPoint.z_altitude_corrected || prevPoint.z_altitude);
+                prevCorrectedAltForRecalc = parseFloat(prevPoint.z_altitude_corrected_api || prevPoint.z_altitude_used);
                 if (currentPoint.timestamp > prevPoint.timestamp) {
-                    timeDeltaS = currentPoint.timestamp - prevPoint.timestamp;
-                } else if (currentPoint.timestamp === prevPoint.timestamp && timeDeltaS === 0 && i > 0){
-                     timeDeltaS = 0.1; 
+                    timeDeltaSRecalc = currentPoint.timestamp - prevPoint.timestamp;
+                } else if (currentPoint.timestamp === prevPoint.timestamp && i > 0){ // Avoid 0 delta if timestamps are same
+                     timeDeltaSRecalc = 0.1; // Smallest delta if log has identical timestamps for some reason
                 }
             } else {
-                prevCorrectedAlt = currentAlt;
+                prevCorrectedAltForRecalc = currentAltForRecalc;
             }
-            const altitudeChangeM = currentAlt - prevCorrectedAlt;
+            const altitudeChangeM = currentAltForRecalc - prevCorrectedAltForRecalc;
             if (i > 0) { 
                  if (altitudeChangeM > 0) totalAscentM += altitudeChangeM;
                  else totalDescentM += Math.abs(altitudeChangeM);
@@ -772,41 +849,40 @@ document.addEventListener('DOMContentLoaded', function() {
             const prevSpeedKmh = (i > 0) ? parseFloat(recalculatedLog[i-1].velocity) : speedKmh;
             const prevSpeedMs = prevSpeedKmh / 3.6;
             const avgSpeedMsForTickHorizontal = (speedMs + prevSpeedMs) / 2;
-            let distanceHorizontalM = avgSpeedMsForTickHorizontal * timeDeltaS;
+            let distanceHorizontalM = avgSpeedMsForTickHorizontal * timeDeltaSRecalc;
             let gradientDecimal = 0;
-            if (Math.abs(distanceHorizontalM) > 0.01 && timeDeltaS > 0) {
+            if (Math.abs(distanceHorizontalM) > 0.01 && timeDeltaSRecalc > 0) {
                 gradientDecimal = altitudeChangeM / distanceHorizontalM;
-            } else if (Math.abs(altitudeChangeM) > 0.001 && timeDeltaS > 0) {
+            } else if (Math.abs(altitudeChangeM) > 0.001 && timeDeltaSRecalc > 0) {
                 gradientDecimal = altitudeChangeM > 0 ? 0.30 : -0.30;
             }
             gradientDecimal = Math.max(-0.30, Math.min(0.30, gradientDecimal));
-            currentPoint.gradient_corrected = (gradientDecimal * 100).toFixed(1);
+            currentPoint.gradient_corrected_val = (gradientDecimal * 100).toFixed(1);
 
             const powerData = {
                 speedKmh: speedKmh, previousSpeedKmh: prevSpeedKmh,
-                altitudeM: currentAlt, previousAltitudeM: prevCorrectedAlt,
-                cadenceRpm: parseInt(currentPoint.cadence), timeDeltaS: timeDeltaS > 0 ? timeDeltaS : 1.0,
-                gradientPercent: parseFloat(currentPoint.gradient_corrected),
+                altitudeM: currentAltForRecalc, previousAltitudeM: prevCorrectedAltForRecalc,
+                cadenceRpm: parseInt(currentPoint.cadence), timeDeltaS: timeDeltaSRecalc > 0 ? timeDeltaSRecalc : 1.0,
+                gradientPercent: parseFloat(currentPoint.gradient_corrected_val),
                 bikeBearingDegrees: currentPoint.bike_bearing !== "N/A" ? parseFloat(currentPoint.bike_bearing) : null,
                 windSpeedMs: currentPoint.wind_speed_ms !== "N/A" ? parseFloat(currentPoint.wind_speed_ms) : 0,
                 windDirectionDegrees: currentPoint.wind_direction_deg !== "N/A" ? parseFloat(currentPoint.wind_direction_deg) : null
             };
-            
             let pRolling = calculateRollingResistancePower(speedMs, settings.systemMass, settings.crr, gradientDecimal);
             let pAero = calculateAerodynamicPower(
                 speedMs, powerData.bikeBearingDegrees, powerData.windSpeedMs, powerData.windDirectionDegrees,
                 settings.cda, settings.airDensity
             );
-            let pGravity = calculateGravityPowerDirect(settings.systemMass, altitudeChangeM, timeDeltaS);
-            let pKinetic = calculateKineticPower(settings.systemMass, speedMs, prevSpeedMs, timeDeltaS);
+            let pGravity = calculateGravityPowerDirect(settings.systemMass, altitudeChangeM, timeDeltaSRecalc);
+            let pKinetic = calculateKineticPower(settings.systemMass, speedMs, prevSpeedMs, timeDeltaSRecalc);
             let systemPower = pRolling + pAero + pGravity + pKinetic;
             let riderPowerOutput = systemPower;
             if (powerData.cadenceRpm === 0) riderPowerOutput = 0;
             else if (riderPowerOutput < 0) riderPowerOutput = 0;
-            currentPoint.power_corrected = Math.round(riderPowerOutput);
-            newPowerReadings.push(riderPowerOutput);
+            currentPoint.power_recalculated = Math.round(riderPowerOutput);
+            newPowerReadingsCorrected.push(riderPowerOutput);
         }
-        const newAvgPower = newPowerReadings.length > 0 ? Math.round(newPowerReadings.reduce((a, b) => a + b, 0) / newPowerReadings.length) : 0;
+        const newAvgPower = newPowerReadingsCorrected.length > 0 ? Math.round(newPowerReadingsCorrected.reduce((a, b) => a + b, 0) / newPowerReadingsCorrected.length) : 0;
         if(statusEl) statusEl.textContent = "Recalculation complete.";
         return { 
             recalculatedLog: recalculatedLog, 
@@ -818,7 +894,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 14. GROUP RIDE TRACKING FUNCTIONS (Firebase)
+    // 15. GROUP RIDE TRACKING FUNCTIONS (Firebase)
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     async function signInAnonymouslyIfNeeded() {
         if (!auth) { console.error("Firebase auth is not initialized."); if(statusEl) statusEl.textContent = "Error: Firebase not ready."; return; }
@@ -843,43 +919,28 @@ document.addEventListener('DOMContentLoaded', function() {
     async function joinGroupRideRoom() {
         const roomName = roomNameInput.value.trim();
         const displayName = displayNameInput.value.trim();
-
         if (!roomName) { alert("Please enter a Room Name."); return; }
         if (!displayName) { alert("Please enter Your Display Name."); return; }
         if (!consentLocationShareCheckbox.checked) {
-            alert("You must consent to location sharing to join a group room.");
-            return;
+            alert("You must consent to location sharing to join a group room."); return;
         }
-
         try {
             await signInAnonymouslyIfNeeded(); 
-            if (!currentUserId) {
-                if(groupStatusEl) groupStatusEl.textContent = "Failed to get user ID for room.";
-                return;
-            }
-
-            currentRoomName = roomName;
-            currentUserDisplayName = displayName;
-
+            if (!currentUserId) { if(groupStatusEl) groupStatusEl.textContent = "Failed to get user ID for room."; return; }
+            currentRoomName = roomName; currentUserDisplayName = displayName;
             const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
             await db.collection('rooms').doc(currentRoomName).collection('members').doc(currentUserId).set({
-                displayName: currentUserDisplayName,
-                joinedAt: serverTimestamp,
-                lastSeen: serverTimestamp,
-                location: null 
+                displayName: currentUserDisplayName, joinedAt: serverTimestamp,
+                lastSeen: serverTimestamp, location: null 
             }, { merge: true });
-
             if(groupStatusEl) groupStatusEl.textContent = `Joined room: ${currentRoomName} as ${currentUserDisplayName}`;
             if(joinRoomButton) joinRoomButton.disabled = true;
             if(leaveRoomButton) leaveRoomButton.disabled = false;
             if(roomNameInput) roomNameInput.disabled = true;
             if(displayNameInput) displayNameInput.disabled = true;
-
             if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval);
             sendLocationToGroupInterval = setInterval(sendMyLocationToGroup, GROUP_LOCATION_SEND_INTERVAL_MS);
-
-            listenForGroupMembers(); // Start listening for others
-
+            listenForGroupMembers();
             console.log(`Joined room ${currentRoomName}`);
         } catch (error) {
             console.error("Error joining group room:", error);
@@ -888,15 +949,10 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     async function sendMyLocationToGroup() {
-        if (!isRunning || isPaused || !currentRoomName || !currentUserId || currentLatitude === null || currentLongitude === null) {
-            return;
-        }
+        if (!isRunning || isPaused || !currentRoomName || !currentUserId || currentLatitude === null || currentLongitude === null) return;
         const locationData = {
-            latitude: currentLatitude,
-            longitude: currentLongitude,
-            altitude: currentAltitudeM,
-            speedKmh: currentSpeedKmh,
-            bearing: currentBikeBearingDegrees,
+            latitude: currentLatitude, longitude: currentLongitude, altitude: currentAltitudeM,
+            speedKmh: currentSpeedKmh, bearing: currentBikeBearingDegrees,
             updatedAt: new Date().toISOString() 
         };
         try {
@@ -904,30 +960,24 @@ document.addEventListener('DOMContentLoaded', function() {
                 location: locationData,
                 lastSeen: firebase.firestore.FieldValue.serverTimestamp() 
             });
-        } catch (error) {
-            console.error("Error sending location to group:", error);
-        }
+        } catch (error) { console.error("Error sending location to group:", error); }
     }
 
     function listenForGroupMembers() {
-        if (!currentRoomName || !db) return; // Ensure db is initialized
+        if (!currentRoomName || !db) return;
         if (groupMembersListener) groupMembersListener(); 
-
         groupMembersListener = db.collection('rooms').doc(currentRoomName).collection('members')
             .onSnapshot(snapshot => {
                 snapshot.docChanges().forEach(change => {
                     const memberId = change.doc.id;
                     const memberData = change.doc.data();
-
                     if (memberId === currentUserId) return; 
-
                     if (change.type === "added" || change.type === "modified") {
                         if (memberData.location && memberData.location.latitude !== undefined && memberData.location.longitude !== undefined) {
                             if (!groupMembers[memberId]) { 
                                 groupMembers[memberId] = {
                                     displayName: memberData.displayName || "Cyclist",
-                                    lat: memberData.location.latitude,
-                                    lon: memberData.location.longitude,
+                                    lat: memberData.location.latitude, lon: memberData.location.longitude,
                                     marker: null,
                                     lastSeen: memberData.lastSeen ? memberData.lastSeen.toMillis() : 0
                                 };
@@ -951,24 +1001,20 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function updateGroupMemberMarker(memberId) {
-        if (!map || !groupMembers[memberId] || groupMembers[memberId].lat === null || groupMembers[memberId].lon === null) {
-            return;
-        }
+        if (!map || !groupMembers[memberId] || groupMembers[memberId].lat === null || groupMembers[memberId].lon === null) return;
         const member = groupMembers[memberId];
         const latLng = [member.lat, member.lon];
         if (member.marker) {
             member.marker.setLatLng(latLng);
         } else {
-            // Simple green dot marker for other riders
             const otherRiderIcon = L.divIcon({
                 className: 'other-rider-marker',
-                html: `<div style="background-color: green; width: 10px; height: 10px; border-radius: 50%; border: 1px solid white;"></div>`,
-                iconSize: [12, 12],
-                iconAnchor: [6, 6]
+                html: `<div style="background-color: green; width: 10px; height: 10px; border-radius: 50%; border: 1px solid white; box-shadow: 0 0 3px black;"></div>`,
+                iconSize: [12, 12], iconAnchor: [6, 6]
             });
             member.marker = L.marker(latLng, { icon: otherRiderIcon }).addTo(map);
         }
-        member.marker.bindTooltip(member.displayName, {permanent: false, direction: 'top'}); //.openTooltip(); // Tooltip on hover is better
+        member.marker.bindTooltip(member.displayName, {permanent: false, direction: 'top'});
     }
 
     function removeGroupMemberMarker(memberId) {
@@ -980,33 +1026,20 @@ document.addEventListener('DOMContentLoaded', function() {
     async function leaveGroupRideRoom() {
         if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval);
         sendLocationToGroupInterval = null;
-
-        if (groupMembersListener) {
-            groupMembersListener(); 
-            groupMembersListener = null;
-        }
-        Object.keys(groupMembers).forEach(memberId => {
-            removeGroupMemberMarker(memberId);
-        });
+        if (groupMembersListener) { groupMembersListener(); groupMembersListener = null; }
+        Object.keys(groupMembers).forEach(memberId => { removeGroupMemberMarker(memberId); });
         groupMembers = {}; 
-
-        const roomToLeave = currentRoomName; // Capture before nullifying
+        const roomToLeave = currentRoomName; 
         const userToLeave = currentUserId;
-
-        currentRoomName = null; // Nullify global state first
-        currentUserDisplayName = null;
-
+        currentRoomName = null; currentUserDisplayName = null; // Nullify global state
         if (!roomToLeave || !userToLeave || !db) {
              if(groupStatusEl) groupStatusEl.textContent = "Not in a room or user ID missing.";
         } else {
             try {
                 await db.collection('rooms').doc(roomToLeave).collection('members').doc(userToLeave).delete();
                 console.log(`Left room ${roomToLeave} and removed data.`);
-            } catch (error) {
-                console.error("Error leaving group room / deleting data:", error);
-            }
+            } catch (error) { console.error("Error leaving group room / deleting data:", error); }
         }
-
         if(groupStatusEl) groupStatusEl.textContent = "Not in a room.";
         if(joinRoomButton) joinRoomButton.disabled = false;
         if(leaveRoomButton) leaveRoomButton.disabled = true;
@@ -1014,19 +1047,12 @@ document.addEventListener('DOMContentLoaded', function() {
         if(displayNameInput) displayNameInput.disabled = false;
     }
 
-
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 15. EVENT LISTENERS FOR CONTROLS
+    // 16. EVENT LISTENERS FOR CONTROLS
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    if (connectSpeedCadenceButton) {
-        connectSpeedCadenceButton.addEventListener('click', connectSpeedCadenceDevice);
-    }
-    if (joinRoomButton) { 
-        joinRoomButton.addEventListener('click', joinGroupRideRoom);
-    }
-    if (leaveRoomButton) { 
-        leaveRoomButton.addEventListener('click', leaveGroupRideRoom);
-    }
+    if (connectSpeedCadenceButton) connectSpeedCadenceButton.addEventListener('click', connectSpeedCadenceDevice);
+    if (joinRoomButton) joinRoomButton.addEventListener('click', joinGroupRideRoom);
+    if (leaveRoomButton) leaveRoomButton.addEventListener('click', leaveGroupRideRoom);
 
     startRideButton.addEventListener('click', function() {
         if (isRunning) return;
@@ -1035,11 +1061,13 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         isRunning = true; isPaused = false;
         rideStartTime = performance.now(); activeSegmentStartTime = rideStartTime;
-        lastProcessedDataTimestamp = rideStartTime;
-        totalDistanceKm = 0; currentAltitudeM = null; previousAltitudeM = null;
+        lastProcessedDataTimestamp = rideStartTime; lastAltitudeApiCallTimestamp = 0; 
+        
+        totalDistanceKm = 0; currentAltitudeM = null; previousAltitudeM = null; rawGpsAltitudeM = null; apiCorrectedAltitudeM = null;
         currentSpeedKmh = 0; currentCadenceRpm = (settings.defaultCadence || 80);
         powerReadings = []; rideDataLog = []; totalElapsedTimeMs = 0; 
-        previousTimestamp = null; previousLatitude = null; previousLongitude = null;
+        previousTickPerformanceTimestamp = null; // Reset for consistent time delta calc
+        previousLatitude = null; previousLongitude = null; 
         currentLatitude = null; currentLongitude = null; previousSpeedMsForSim = 0;
         currentWindSpeedMs = 0; currentWindDirectionDegrees = null; currentBikeBearingDegrees = null;
         currentGearRatio = null; 
@@ -1060,6 +1088,7 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(() => {
             if (isRunning && currentLatitude !== null && currentLongitude !== null) {
                 fetchAndUpdateWeatherData(currentLatitude, currentLongitude);
+                fetchLiveAltitudeCorrection(currentLatitude, currentLongitude); 
                  if (!map && currentLatitude && currentLongitude) { 
                     initializeMap(currentLatitude, currentLongitude);
                 }
@@ -1084,9 +1113,8 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!isRunning || isPaused) return;
         isPaused = true;
         if (failsafeTickInterval) clearInterval(failsafeTickInterval);
-        if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval); // Stop sending location when paused
+        if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval); 
         sendLocationToGroupInterval = null; 
-        
         pauseSimButton.disabled = true; resumeSimButton.disabled = false;
         statusEl.textContent = "Ride paused."; releaseWakeLock(); 
     });
@@ -1095,16 +1123,15 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!isRunning || !isPaused) return;
         isPaused = false;
         activeSegmentStartTime = performance.now(); 
-        previousTimestamp = activeSegmentStartTime; 
+        previousTickPerformanceTimestamp = activeSegmentStartTime; // Reset for time delta
         lastProcessedDataTimestamp = activeSegmentStartTime;
+        lastAltitudeApiCallTimestamp = performance.now(); // Prevent immediate API call
         if (failsafeTickInterval) clearInterval(failsafeTickInterval);
         failsafeTickInterval = setInterval(ensurePeriodicUpdate, 1000);
-
-        if (currentRoomName && currentUserId) { // Restart sending location if in a room
+        if (currentRoomName && currentUserId) {
             if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval);
             sendLocationToGroupInterval = setInterval(sendMyLocationToGroup, GROUP_LOCATION_SEND_INTERVAL_MS);
         }
-
         pauseSimButton.disabled = false; resumeSimButton.disabled = true;
         statusEl.textContent = "Ride resumed."; requestWakeLock(); 
     });
@@ -1115,13 +1142,9 @@ document.addEventListener('DOMContentLoaded', function() {
         if (geolocWatchId !== null) { navigator.geolocation.clearWatch(geolocWatchId); geolocWatchId = null; }
         if (failsafeTickInterval) clearInterval(failsafeTickInterval); failsafeTickInterval = null;
         if (weatherApiUpdateInterval) clearInterval(weatherApiUpdateInterval); weatherApiUpdateInterval = null;
-        
-        if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval); // Stop sending group locations
+        if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval); 
         sendLocationToGroupInterval = null;
-        if (currentRoomName && currentUserId) { // If in a room, also leave it
-            await leaveGroupRideRoom(); 
-        }
-        
+        if (currentRoomName && currentUserId) { await leaveGroupRideRoom(); }
         if (bleDevice && bleDevice.gatt.connected) {
             try {
                 if (cscCharacteristic && typeof cscCharacteristic.stopNotifications === 'function') {
@@ -1131,23 +1154,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 bleDevice.gatt.disconnect();
                 console.log("BLE device disconnected on ride stop.");
                 onDisconnected(); 
-            } catch (error) {
-                console.error("Error during BLE disconnection:", error);
-                 onDisconnected(); 
-            }
+            } catch (error) { console.error("Error during BLE disconnection:", error); onDisconnected(); }
         }
         releaseWakeLock(); 
-
         if (map && ridePathPolyline && mapPathCoordinates.length > 0) {
             try { map.fitBounds(ridePathPolyline.getBounds()); } 
             catch (e) { console.warn("Could not fit map to bounds:", e); }
         }
-        
         let finalAvgSpeed = totalElapsedTimeMs > 0 ? (totalDistanceKm / (totalElapsedTimeMs / (1000 * 3600))) : 0;
         let initialAvgPower = powerReadings.length > 0 ? (powerReadings.reduce((acc, val) => acc + val, 0) / powerReadings.length) : 0;
         statusEl.textContent = `Ride Stopped. Distance: ${totalDistanceKm.toFixed(2)} km. Processing final data...`;
         let logToDownload = JSON.parse(JSON.stringify(rideDataLog)); 
-        let finalSummaryText = `Ride Summary (Original GPS Altitude):\nDistance: ${totalDistanceKm.toFixed(2)} km\nTime: ${formatElapsedTime(totalElapsedTimeMs)}\nAvg Speed: ${finalAvgSpeed.toFixed(1)} km/h\nAvg Power: ${Math.round(initialAvgPower)} W`;
+        let finalSummaryText = `Ride Summary (Original GPS & Live API Altitude):\nDistance: ${totalDistanceKm.toFixed(2)} km\nTime: ${formatElapsedTime(totalElapsedTimeMs)}\nAvg Speed: ${finalAvgSpeed.toFixed(1)} km/h\nAvg Power: ${Math.round(initialAvgPower)} W`;
         let finalAvgPowerForDisplay = initialAvgPower;
 
         if (logToDownload.length > 0) {
@@ -1157,11 +1175,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (recalced.recalculatedLog) {
                     logToDownload = recalced.recalculatedLog; 
                     finalAvgPowerForDisplay = recalced.summary.avgPowerCorrected;
-                    finalSummaryText = `Ride Summary (Corrected Altitude):\nDistance: ${totalDistanceKm.toFixed(2)} km\nTime: ${formatElapsedTime(totalElapsedTimeMs)}\nAvg Speed: ${finalAvgSpeed.toFixed(1)} km/h\nAvg Power: ${Math.round(finalAvgPowerForDisplay)} W\nTotal Ascent (Corrected): ${recalced.summary.totalAscentM}m`;
+                    finalSummaryText = `Ride Summary (Post-Ride Corrected Altitude):\nDistance: ${totalDistanceKm.toFixed(2)} km\nTime: ${formatElapsedTime(totalElapsedTimeMs)}\nAvg Speed: ${finalAvgSpeed.toFixed(1)} km/h\nAvg Power: ${Math.round(finalAvgPowerForDisplay)} W\nTotal Ascent (Corrected): ${recalced.summary.totalAscentM}m`;
                     statusEl.textContent = `Ride Stopped. Corrected Data. Ascent: ${recalced.summary.totalAscentM}m.`;
                     if (avgPowerEl) avgPowerEl.textContent = Math.round(finalAvgPowerForDisplay);
-                } else { statusEl.textContent += " Recalculation failed. Using original GPS data."; }
-            } else { statusEl.textContent += " Elevation correction failed. Using original GPS data."; }
+                } else { statusEl.textContent += " Recalculation failed. Using live altitude data."; }
+            } else { statusEl.textContent += " Post-ride elevation correction failed. Using live altitude data."; }
         }
         alert(finalSummaryText); 
         if (logToDownload.length > 0) { downloadRideDataCSV(logToDownload); }
@@ -1169,19 +1187,23 @@ document.addEventListener('DOMContentLoaded', function() {
 
         startRideButton.disabled = false; pauseSimButton.disabled = true;
         resumeSimButton.disabled = true; stopSimButton.disabled = true;
-        totalElapsedTimeMs = 0; previousTimestamp = null; previousLatitude = null;
-        previousLongitude = null; previousAltitudeM = null; currentLatitude = null; 
-        currentLongitude = null; currentAltitudeM = null; powerReadings = [];
+        totalElapsedTimeMs = 0; previousTickPerformanceTimestamp = null; 
+        previousLatitude = null; previousLongitude = null; previousAltitudeM = null; 
+        currentLatitude = null; currentLongitude = null; currentAltitudeM = null; 
+        rawGpsAltitudeM = null; apiCorrectedAltitudeM = null;
+        powerReadings = [];
     }
 
     stopSimButton.addEventListener('click', stopRide);
 
     function downloadRideDataCSV(dataLog) {
         const headers = [
-            "Timestamp (s)", "Abs GPS Timestamp", "Velocity (km/h)", "Power (W) (Original)", "Power Corrected (W)",
+            "Timestamp (s)", "Abs GPS Timestamp", "Perf Timestamp Event", "Time Delta (s)", "Velocity (km/h)", 
+            "Power (W) (Live Calc)", "Power Corrected (Post-Ride) (W)",
             "Longitude (X)", "Latitude (Y)", 
-            "Altitude GPS (Z) (m)", "Altitude API Corrected (Z) (m)", "Altitude Source",
-            "Gradient GPS (%)", "Gradient Corrected (%)", 
+            "Altitude RAW GPS (Z) (m)", "Altitude Used Live (Z) (m)", 
+            "Altitude API Corrected (Post-Ride) (m)", "Altitude Source (Final)",
+            "Gradient Live (%)", "Gradient Corrected (Post-Ride) (%)", 
             "Cadence (RPM)", "GPS Accuracy (m)", "Synthetic Tick",
             "Bike Bearing (deg)", "Wind Speed (m/s)", "Wind Direction (deg)",
             "Sensor Speed (km/h)", "Sensor Cadence (RPM)", "Gear Ratio"
@@ -1190,14 +1212,17 @@ document.addEventListener('DOMContentLoaded', function() {
         dataLog.forEach(row => {
             const rowValues = [
                 row.timestamp, row.abs_timestamp_gps || "N/A",
-                row.velocity, row.power, 
-                row.power_corrected !== undefined ? row.power_corrected : row.power,
+                row.perf_timestamp_event || "N/A", row.time_delta_s || "N/A",
+                row.velocity, 
+                row.power, 
+                row.power_recalculated !== undefined ? row.power_recalculated : (row.power_corrected !== undefined ? row.power_corrected : row.power),
                 row.x_longitude, row.y_latitude, 
-                row.z_altitude, 
-                row.z_altitude_corrected || row.z_altitude, 
-                row.altitude_source || "GPS",
+                row.z_altitude_raw_gps, 
+                row.z_altitude_used,    
+                row.z_altitude_corrected_api || row.z_altitude_used, 
+                row.altitude_source_final || (row.z_altitude_corrected_api ? "API_Post" : (row.altitude_source || "GPS_Live")),
                 row.gradient, 
-                row.gradient_corrected || row.gradient, 
+                row.gradient_corrected_val || row.gradient, 
                 row.cadence, row.gps_accuracy,
                 row.synthetic ? "1" : "0",
                 row.bike_bearing !== null && row.bike_bearing !== "N/A" ? row.bike_bearing : "N/A",
@@ -1232,7 +1257,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-    // 16. INITIALIZATION
+    // 17. INITIALIZATION
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     loadRideSettings();
     if (mapDisplayEl) { 
