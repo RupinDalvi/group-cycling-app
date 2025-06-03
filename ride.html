@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cycling Power - Live Ride</title>
     
-    <!-- LEAFLET CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" 
      crossorigin=""/>
@@ -237,34 +236,32 @@
             <pre id="currentSettingsText"></pre>
         </div>
     </div>
+	<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+		 integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+		 crossorigin=""></script>
+	<script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-app-compat.js"></script>
+	<script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-auth-compat.js"></script>
+	<script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-firestore-compat.js"></script>
 
-    <!-- LEAFLET JS (Make sure it's before your ride.js) -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-     crossorigin=""></script>
-    
-    <!-- Firebase SDK -->
-    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-auth-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-firestore-compat.js"></script>
+	<script>
+	  // Your web app's Firebase configuration - REPLACE WITH YOUR ACTUAL CONFIG
+	  const firebaseConfig = {
+		apiKey: "AIzaSyAYD2EHeq-FXi2IcD_sEyMX2hQ8GOjBpHQ",
+		authDomain: "group-ride-7ae51.firebaseapp.com",
+		projectId: "group-ride-7ae51",
+		storageBucket: "group-ride-7ae51.firebasestorage.app",
+		messagingSenderId: "148762526666",
+		appId: "1:148762526666:web:18cf53418075d41b848533",
+		measurementId: "G-7FN0E4SEZ2"
+	  };
 
-    <script>
-      // Your web app's Firebase configuration - REPLACE WITH YOUR ACTUAL CONFIG
-      const firebaseConfig = {
-        apiKey: "YOUR_API_KEY",
-        authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-        projectId: "YOUR_PROJECT_ID",
-        storageBucket: "YOUR_PROJECT_ID.appspot.com",
-        messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-        appId: "YOUR_APP_ID"
-      };
+	  // Initialize Firebase
+	  firebase.initializeApp(firebaseConfig);
+	  const auth = firebase.auth();
+	  const db = firebase.firestore(); // Using Firestore
+	</script>
 
-      // Initialize Firebase
-      firebase.initializeApp(firebaseConfig);
-      // const auth = firebase.auth(); // These are now initialized in ride.js
-      // const db = firebase.firestore(); 
-    </script>
-
-    <script src="ride.js"></script>
+	<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+	<script src="ride.js"></script>
 </body>
 </html>
