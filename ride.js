@@ -1,4 +1,4 @@
-// ride.js - Full file with all features up to Group Tracking Stage 2 & Timestamp Fixes
+// ride.js - Full file with Timestamp & Elapsed Time Fixes
 
 document.addEventListener('DOMContentLoaded', function() {
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
@@ -49,9 +49,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let geolocWatchId = null;
     let isPaused = false;
     let isRunning = false;
-    let rideStartTime = 0; // performance.now() at overall ride start
-    let activeSegmentStartTime = 0; // performance.now() at start/resume of current segment
-    let totalElapsedTimeMs = 0; // Accumulates active riding time based on performance.now() deltas
+    let rideStartTime = 0; 
+    let activeSegmentStartTime = 0; 
+    let totalElapsedTimeMs = 0; 
     let totalDistanceKm = 0;
     let currentAltitudeM = null; 
     let previousAltitudeM = null; 
@@ -59,7 +59,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentSpeedKmh = 0;
     let currentCadenceRpm = 0; 
     let powerReadings = [];
-    let previousTickPerformanceTimestamp = null; // Stores performance.now() of the PREVIOUS processed tick
+    let previousTickPerformanceTimestamp = null; 
     let previousLatitude = null;
     let previousLongitude = null;
     let previousSpeedMsForSim = 0; 
@@ -68,7 +68,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentLongitude = null; 
     let wakeLock = null;
     let failsafeTickInterval = null;
-    let lastTickTime = 0; // performance.now() of the last time processPositionUpdate actually ran (real or synthetic)
+    let lastTickTime = 0; 
     const FORCED_TICK_INTERVAL_MS = 1000; 
     const MAX_SILENCE_BEFORE_FORCED_TICK_MS = 1500; 
     let currentWindSpeedMs = 0; 
@@ -105,7 +105,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const ALTITUDE_API_CALL_INTERVAL_MS = 10000; 
     let altitudeApiCallInProgress = false;
 
-    // Firebase services
     const auth = firebase.auth();
     const db = firebase.firestore();
 
@@ -475,9 +474,12 @@ document.addEventListener('DOMContentLoaded', function() {
         let timeDeltaS = 0;
         if (previousTickPerformanceTimestamp !== null) {
             timeDeltaS = (currentTickPerformanceTimestamp - previousTickPerformanceTimestamp) / 1000;
+        } else { // First tick of a segment
+            timeDeltaS = 0; // No delta for the very first point, or use a small default if calculations need it
         }
         
-        if (timeDeltaS < 0.01 && !position.synthetic) { 
+        // Ensure timeDeltaS is reasonable
+        if (timeDeltaS < 0.01 && !position.synthetic && previousTickPerformanceTimestamp !== null) { 
              if (currentLatitude === position.coords.latitude && currentLongitude === position.coords.longitude && 
                  rawGpsAltitudeM === position.coords.altitude &&
                  (position.coords.speed !== null ? (position.coords.speed * 3.6) : 0) === currentSpeedKmh ) {
@@ -487,16 +489,16 @@ document.addEventListener('DOMContentLoaded', function() {
             timeDeltaS = 0.05; 
         }
         if (position.synthetic) {
-            // For synthetic ticks, calculate delta from lastTickTime to ensure it's ~1s
-            // if previousTickPerformanceTimestamp was from a much earlier real GPS event.
+            // For synthetic ticks, delta is from last actual processed time to now.
+            // If previousTickPerformanceTimestamp is from a while ago, this delta could be large.
+            // We want the synthetic tick to represent roughly FORCED_TICK_INTERVAL_MS.
+            // So, if called by ensurePeriodicUpdate, the effective delta for accumulation should be ~1s.
+            // Let's ensure it's at least the forced interval if it's a synthetic tick.
             let syntheticDelta = (currentTickPerformanceTimestamp - (previousTickPerformanceTimestamp || currentTickPerformanceTimestamp - FORCED_TICK_INTERVAL_MS)) / 1000;
-            if (syntheticDelta <= 0 || syntheticDelta > (FORCED_TICK_INTERVAL_MS / 1000) * 1.5) { // If too far off 1s
-                timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000;
-            } else {
-                timeDeltaS = syntheticDelta;
-            }
+            timeDeltaS = Math.max(FORCED_TICK_INTERVAL_MS / 1000, syntheticDelta);
+            if (timeDeltaS > (FORCED_TICK_INTERVAL_MS / 1000) * 1.5) timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000; // Cap it
         }
-        if (timeDeltaS <=0) timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000; // Final fallback
+        if (timeDeltaS <=0) timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000; // Final fallback for positive delta
         
         totalElapsedTimeMs += (timeDeltaS * 1000); 
         previousTickPerformanceTimestamp = currentTickPerformanceTimestamp; 
@@ -514,7 +516,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         let altitudeToUse = currentAltitudeM; 
         if (apiCorrectedAltitudeM !== null && 
-            (performance.now() - lastAltitudeApiCallTimestamp < ALTITUDE_API_CALL_INTERVAL_MS + 5000) ) { // Use API alt if "fresh" (e.g. within 15s)
+            (performance.now() - lastAltitudeApiCallTimestamp < ALTITUDE_API_CALL_INTERVAL_MS + 5000) ) { 
             altitudeToUse = apiCorrectedAltitudeM;
         } else if (rawGpsAltitudeM !== null) { 
             altitudeToUse = rawGpsAltitudeM;
@@ -534,10 +536,12 @@ document.addEventListener('DOMContentLoaded', function() {
             currentBikeBearingDegrees = calculateBearing(currentLatitude, currentLongitude, newLatitude, newLongitude);
         }
         
+        // Update global current lat/lon *after* using them as "previous" for bearing
         if (newLatitude !== null) currentLatitude = newLatitude;
         if (newLongitude !== null) currentLongitude = newLongitude;
         
-        previousAltitudeM = currentAltitudeM; // Store what currentAltitudeM WAS before this tick's update
+        // previousAltitudeM for NEXT tick's calculation should be the altitude WE USED this tick.
+        previousAltitudeM = currentAltitudeM; // Store what currentAltitudeM WAS
         currentAltitudeM = altitudeToUse;     // Update currentAltitudeM to what's used for THIS tick
         
         let gpsSpeedMs = position.coords && position.coords.speed !== null ? position.coords.speed : 0;
@@ -724,7 +728,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function ensurePeriodicUpdate() {
         if (!isRunning || isPaused) { return; }
         const now = performance.now();
-        if ((now - lastTickTime) > MAX_SILENCE_BEFORE_FORCED_TICK_MS) { // Use lastTickTime
+        if ((now - lastTickTime) > MAX_SILENCE_BEFORE_FORCED_TICK_MS) { 
             console.log("Failsafe: No GPS update recently, forcing synthetic tick.");
             const syntheticPosition = {
                 coords: {
@@ -734,7 +738,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     speed: 0, 
                     accuracy: null                
                 },
-                timestamp: null, // Let processPositionUpdate use performance.now() for this
+                timestamp: null, 
                 synthetic: true 
             };
             processPositionUpdate(syntheticPosition); 
@@ -816,7 +820,10 @@ document.addEventListener('DOMContentLoaded', function() {
             if (i > 0) {
                 const prevPoint = recalculatedLog[i-1];
                 prevCorrectedAltForRecalc = parseFloat(prevPoint.z_altitude_corrected_api || prevPoint.z_altitude_used);
-                if (parseFloat(currentPoint.timestamp) > parseFloat(prevPoint.timestamp)) { 
+                // Use the logged time_delta_s if available and valid, otherwise assume 1s based on timestamp
+                if (currentPoint.time_delta_s && parseFloat(currentPoint.time_delta_s) > 0) {
+                    timeDeltaSRecalc = parseFloat(currentPoint.time_delta_s);
+                } else if (parseFloat(currentPoint.timestamp) > parseFloat(prevPoint.timestamp)) { 
                     timeDeltaSRecalc = parseFloat(currentPoint.timestamp) - parseFloat(prevPoint.timestamp);
                 } else if (parseFloat(currentPoint.timestamp) === parseFloat(prevPoint.timestamp) && i > 0){
                      timeDeltaSRecalc = 0.1; 
