@@ -1,4 +1,4 @@
-// ride.js - Live API-Assisted Altitude Correction
+// ride.js - Full file with all features up to Group Tracking Stage 2 & Timestamp Fixes
 
 document.addEventListener('DOMContentLoaded', function() {
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
@@ -49,9 +49,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let geolocWatchId = null;
     let isPaused = false;
     let isRunning = false;
-    let rideStartTime = 0;
-    let activeSegmentStartTime = 0;
-    let totalElapsedTimeMs = 0;
+    let rideStartTime = 0; // performance.now() at overall ride start
+    let activeSegmentStartTime = 0; // performance.now() at start/resume of current segment
+    let totalElapsedTimeMs = 0; // Accumulates active riding time based on performance.now() deltas
     let totalDistanceKm = 0;
     let currentAltitudeM = null; 
     let previousAltitudeM = null; 
@@ -59,7 +59,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentSpeedKmh = 0;
     let currentCadenceRpm = 0; 
     let powerReadings = [];
-    let previousTickPerformanceTimestamp = null; 
+    let previousTickPerformanceTimestamp = null; // Stores performance.now() of the PREVIOUS processed tick
     let previousLatitude = null;
     let previousLongitude = null;
     let previousSpeedMsForSim = 0; 
@@ -68,8 +68,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentLongitude = null; 
     let wakeLock = null;
     let failsafeTickInterval = null;
-    const STALE_GPS_THRESHOLD_MS = 2500; 
-    let lastProcessedDataTimestamp = 0; 
+    let lastTickTime = 0; // performance.now() of the last time processPositionUpdate actually ran (real or synthetic)
+    const FORCED_TICK_INTERVAL_MS = 1000; 
+    const MAX_SILENCE_BEFORE_FORCED_TICK_MS = 1500; 
     let currentWindSpeedMs = 0; 
     let currentWindDirectionDegrees = null; 
     let currentBikeBearingDegrees = null;   
@@ -164,18 +165,12 @@ document.addEventListener('DOMContentLoaded', function() {
         return R * c;
     }
 
-    function toDegrees(radians) {
-        return radians * 180 / Math.PI;
-    }
-    function toRadians(degrees) {
-        return degrees * Math.PI / 180;
-    }
+    function toDegrees(radians) { return radians * 180 / Math.PI; }
+    function toRadians(degrees) { return degrees * Math.PI / 180; }
 
     function calculateBearing(lat1, lon1, lat2, lon2) {
         if (lat1 === null || lon1 === null || lat2 === null || lon2 === null) return null;
-        const φ1 = toRadians(lat1);
-        const φ2 = toRadians(lat2);
-        const Δλ = toRadians(lon2 - lon1);
+        const φ1 = toRadians(lat1); const φ2 = toRadians(lat2); const Δλ = toRadians(lon2 - lon1);
         const y = Math.sin(Δλ) * Math.cos(φ2);
         const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
         const θ = Math.atan2(y, x);
@@ -214,7 +209,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (windSpeedDisplayEl) windSpeedDisplayEl.textContent = "Error";
         }
     }
-
+    
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
     // 6. LIVE ALTITUDE CORRECTION API FUNCTION
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
@@ -224,22 +219,16 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         altitudeApiCallInProgress = true;
         console.log(`Fetching live altitude for: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`);
-        // Using a simple elevation API, Open-Meteo also offers this.
         const apiUrl = `https://api.open-meteo.com/v1/elevation?latitude=${latitude.toFixed(4)}&longitude=${longitude.toFixed(4)}`;
-
         try {
             const response = await fetch(apiUrl);
-            if (!response.ok) {
-                throw new Error(`Live Elevation API HTTP error! status: ${response.status}`);
-            }
+            if (!response.ok) throw new Error(`Live Elevation API HTTP error! status: ${response.status}`);
             const data = await response.json();
             if (data.elevation && data.elevation.length > 0) {
                 apiCorrectedAltitudeM = parseFloat(data.elevation[0]);
                 console.log(`Live API Corrected Altitude: ${apiCorrectedAltitudeM.toFixed(1)}m`);
             } else {
                 console.warn("Live elevation data not found in API response:", data);
-                // If API fails or returns no data, apiCorrectedAltitudeM remains null or its old value
-                // The app will then fallback to rawGpsAltitudeM in processPositionUpdate
             }
         } catch (error) {
             console.error("Error fetching live altitude correction:", error);
@@ -299,11 +288,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const speedMs = data.speedKmh / 3.6;
         const prevSpeedMs = data.previousSpeedKmh / 3.6; 
         const timeDeltaS = data.timeDeltaS;
-        
         const currentCalcAltitude = data.altitudeM !== null ? data.altitudeM : (data.previousAltitudeM || 0);
         const prevCalcAltitude = data.previousAltitudeM !== null ? data.previousAltitudeM : currentCalcAltitude;
         const altitudeChangeM = currentCalcAltitude - prevCalcAltitude;
-
         const avgSpeedMsForTickHorizontal = (speedMs + prevSpeedMs) / 2;
         let distanceHorizontalM = avgSpeedMsForTickHorizontal * timeDeltaS;
         let gradientDecimal = 0;
@@ -314,7 +301,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         gradientDecimal = Math.max(-0.30, Math.min(0.30, gradientDecimal));
         data.gradientPercent = gradientDecimal * 100;
-
         let pRolling = calculateRollingResistancePower(speedMs, settings.systemMass, settings.crr, gradientDecimal);
         let pAero = calculateAerodynamicPower(
             speedMs, data.bikeBearingDegrees, data.windSpeedMs, data.windDirectionDegrees,
@@ -484,31 +470,35 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!isRunning) return; 
 
         const currentTickPerformanceTimestamp = performance.now();
-        const previousProcessedTime = lastProcessedDataTimestamp; 
-        lastProcessedDataTimestamp = currentTickPerformanceTimestamp; // Update for failsafe ticker
+        lastTickTime = currentTickPerformanceTimestamp; 
 
         let timeDeltaS = 0;
-        if (previousTickPerformanceTimestamp !== null) { // Use performance timestamp for delta
+        if (previousTickPerformanceTimestamp !== null) {
             timeDeltaS = (currentTickPerformanceTimestamp - previousTickPerformanceTimestamp) / 1000;
         }
         
-        if (timeDeltaS < 0.05 && previousTickPerformanceTimestamp !== null && !position.synthetic) { 
+        if (timeDeltaS < 0.01 && !position.synthetic) { 
              if (currentLatitude === position.coords.latitude && currentLongitude === position.coords.longitude && 
                  rawGpsAltitudeM === position.coords.altitude &&
                  (position.coords.speed !== null ? (position.coords.speed * 3.6) : 0) === currentSpeedKmh ) {
-                // No significant change, only update previousTickPerformanceTimestamp if we decide to skip full processing
-                // For now, we proceed but timeDeltaS might be small.
-                // previousTickPerformanceTimestamp = currentTickPerformanceTimestamp; 
-                // return; 
+                previousTickPerformanceTimestamp = currentTickPerformanceTimestamp; 
+                return; 
             }
-             if (timeDeltaS <=0) timeDeltaS = 0.05; // Force small positive delta if data changed but time didn't
+            timeDeltaS = 0.05; 
         }
-        if (position.synthetic && (timeDeltaS <= 0 || timeDeltaS > 1.5)) { // Synthetic ticks should be ~1s
-            timeDeltaS = 1.0; 
+        if (position.synthetic) {
+            // For synthetic ticks, calculate delta from lastTickTime to ensure it's ~1s
+            // if previousTickPerformanceTimestamp was from a much earlier real GPS event.
+            let syntheticDelta = (currentTickPerformanceTimestamp - (previousTickPerformanceTimestamp || currentTickPerformanceTimestamp - FORCED_TICK_INTERVAL_MS)) / 1000;
+            if (syntheticDelta <= 0 || syntheticDelta > (FORCED_TICK_INTERVAL_MS / 1000) * 1.5) { // If too far off 1s
+                timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000;
+            } else {
+                timeDeltaS = syntheticDelta;
+            }
         }
-        if (timeDeltaS <=0) timeDeltaS = 1.0; // Final fallback for timeDeltaS
+        if (timeDeltaS <=0) timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000; // Final fallback
         
-        if (timeDeltaS > 0) { totalElapsedTimeMs += (timeDeltaS * 1000); }
+        totalElapsedTimeMs += (timeDeltaS * 1000); 
         previousTickPerformanceTimestamp = currentTickPerformanceTimestamp; 
 
         const newLatitude = position.synthetic ? currentLatitude : position.coords.latitude;
@@ -523,10 +513,9 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         let altitudeToUse = currentAltitudeM; 
-        if (apiCorrectedAltitudeM !== null) { 
+        if (apiCorrectedAltitudeM !== null && 
+            (performance.now() - lastAltitudeApiCallTimestamp < ALTITUDE_API_CALL_INTERVAL_MS + 5000) ) { // Use API alt if "fresh" (e.g. within 15s)
             altitudeToUse = apiCorrectedAltitudeM;
-            // Consider if apiCorrectedAltitudeM should be 'used once' then nulled, or if it persists until next API call.
-            // For now, it persists.
         } else if (rawGpsAltitudeM !== null) { 
             altitudeToUse = rawGpsAltitudeM;
         } else if (currentAltitudeM === null) { 
@@ -534,9 +523,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         
         const tempPrevCalcAltitude = previousAltitudeM === null ? altitudeToUse : previousAltitudeM;
-        // Update currentAltitudeM (global) that will be used for THIS tick's calculations
-        currentAltitudeM = altitudeToUse;     
-
+        
         if (newLatitude !== null && newLongitude !== null) {
             updateMap(newLatitude, newLongitude);
         }
@@ -547,9 +534,11 @@ document.addEventListener('DOMContentLoaded', function() {
             currentBikeBearingDegrees = calculateBearing(currentLatitude, currentLongitude, newLatitude, newLongitude);
         }
         
-        // Update global current lat/lon AFTER using them as "previous" for bearing
         if (newLatitude !== null) currentLatitude = newLatitude;
         if (newLongitude !== null) currentLongitude = newLongitude;
+        
+        previousAltitudeM = currentAltitudeM; // Store what currentAltitudeM WAS before this tick's update
+        currentAltitudeM = altitudeToUse;     // Update currentAltitudeM to what's used for THIS tick
         
         let gpsSpeedMs = position.coords && position.coords.speed !== null ? position.coords.speed : 0;
         if (position.synthetic) gpsSpeedMs = 0;
@@ -583,8 +572,7 @@ document.addEventListener('DOMContentLoaded', function() {
             totalDistanceKm += distanceThisTickKm;
         }
 
-        // Update previousLat/Lon for next Haversine using the now current values
-        previousLatitude = currentLatitude; // These were updated from newLatitude
+        previousLatitude = currentLatitude; 
         previousLongitude = currentLongitude;
 
         const powerData = {
@@ -602,7 +590,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const currentPowerW = calculateTotalPower(powerData);
         
         previousSpeedMsForSim = currentSpeedKmh / 3.6; 
-        previousAltitudeM = currentAltitudeM; // The altitude used in this tick becomes previous for next
+        // previousAltitudeM is already updated for the next tick
 
         if (isRunning && !isPaused) { powerReadings.push(currentPowerW); }
         
@@ -610,7 +598,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         rideDataLog.push({
             timestamp: Math.floor(totalElapsedTimeMs / 1000),
-            abs_timestamp_gps: position.timestamp || null, 
+            abs_timestamp_gps: position.timestamp || null,
             perf_timestamp_event: currentTickPerformanceTimestamp, 
             time_delta_s: timeDeltaS.toFixed(3), 
             velocity: currentSpeedKmh.toFixed(1),
@@ -736,25 +724,21 @@ document.addEventListener('DOMContentLoaded', function() {
     function ensurePeriodicUpdate() {
         if (!isRunning || isPaused) { return; }
         const now = performance.now();
-        if ((now - lastProcessedDataTimestamp) > STALE_GPS_THRESHOLD_MS) {
-            console.log("Failsafe: GPS stale or stationary, generating synthetic tick.");
+        if ((now - lastTickTime) > MAX_SILENCE_BEFORE_FORCED_TICK_MS) { // Use lastTickTime
+            console.log("Failsafe: No GPS update recently, forcing synthetic tick.");
             const syntheticPosition = {
                 coords: {
-                    latitude: currentLatitude, longitude: currentLongitude,
-                    altitude: currentAltitudeM, // Use current (potentially API-assisted) altitude for synthetic tick
-                    speed: 0, accuracy: null                
+                    latitude: currentLatitude, 
+                    longitude: currentLongitude,
+                    altitude: currentAltitudeM, 
+                    speed: 0, 
+                    accuracy: null                
                 },
-                timestamp: currentTimestampForTick(), // Use consistent timestamping
+                timestamp: null, // Let processPositionUpdate use performance.now() for this
                 synthetic: true 
             };
             processPositionUpdate(syntheticPosition); 
         }
-    }
-    // Helper for consistent timestamping in synthetic ticks
-    function currentTimestampForTick() {
-        return previousTickPerformanceTimestamp !== null ? 
-               previousTickPerformanceTimestamp + 1000 // Assume 1s tick for synthetic
-               : performance.now();
     }
     
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
@@ -796,6 +780,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const correctedLog = JSON.parse(JSON.stringify(logData));
         let elevationApiIndex = 0;
         for (let i = 0; i < correctedLog.length; i++) {
+            const liveAltitudeUsed = correctedLog[i].z_altitude_used !== "N/A" ? correctedLog[i].z_altitude_used : (correctedLog[i].z_altitude_raw_gps !== "N/A" ? correctedLog[i].z_altitude_raw_gps : null);
             if (correctedLog[i].y_latitude !== "N/A" && correctedLog[i].x_longitude !== "N/A") {
                 if (elevationApiIndex < correctedElevations.length) {
                     correctedLog[i].z_altitude_corrected_api = parseFloat(correctedElevations[elevationApiIndex]).toFixed(1);
@@ -803,11 +788,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     elevationApiIndex++;
                 } else {
                      correctedLog[i].altitude_source_final = "GPS (API data short)";
-                     correctedLog[i].z_altitude_corrected_api = correctedLog[i].z_altitude_used; 
+                     correctedLog[i].z_altitude_corrected_api = liveAltitudeUsed; 
                 }
             } else {
                 correctedLog[i].altitude_source_final = "GPS (Invalid Coords)";
-                correctedLog[i].z_altitude_corrected_api = correctedLog[i].z_altitude_used; 
+                correctedLog[i].z_altitude_corrected_api = liveAltitudeUsed; 
             }
         }
         if(statusEl) statusEl.textContent = "Elevation data corrected.";
@@ -831,10 +816,10 @@ document.addEventListener('DOMContentLoaded', function() {
             if (i > 0) {
                 const prevPoint = recalculatedLog[i-1];
                 prevCorrectedAltForRecalc = parseFloat(prevPoint.z_altitude_corrected_api || prevPoint.z_altitude_used);
-                if (currentPoint.timestamp > prevPoint.timestamp) {
-                    timeDeltaSRecalc = currentPoint.timestamp - prevPoint.timestamp;
-                } else if (currentPoint.timestamp === prevPoint.timestamp && i > 0){ // Avoid 0 delta if timestamps are same
-                     timeDeltaSRecalc = 0.1; // Smallest delta if log has identical timestamps for some reason
+                if (parseFloat(currentPoint.timestamp) > parseFloat(prevPoint.timestamp)) { 
+                    timeDeltaSRecalc = parseFloat(currentPoint.timestamp) - parseFloat(prevPoint.timestamp);
+                } else if (parseFloat(currentPoint.timestamp) === parseFloat(prevPoint.timestamp) && i > 0){
+                     timeDeltaSRecalc = 0.1; 
                 }
             } else {
                 prevCorrectedAltForRecalc = currentAltForRecalc;
@@ -868,6 +853,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 windSpeedMs: currentPoint.wind_speed_ms !== "N/A" ? parseFloat(currentPoint.wind_speed_ms) : 0,
                 windDirectionDegrees: currentPoint.wind_direction_deg !== "N/A" ? parseFloat(currentPoint.wind_direction_deg) : null
             };
+            
             let pRolling = calculateRollingResistancePower(speedMs, settings.systemMass, settings.crr, gradientDecimal);
             let pAero = calculateAerodynamicPower(
                 speedMs, powerData.bikeBearingDegrees, powerData.windSpeedMs, powerData.windDirectionDegrees,
@@ -1031,7 +1017,7 @@ document.addEventListener('DOMContentLoaded', function() {
         groupMembers = {}; 
         const roomToLeave = currentRoomName; 
         const userToLeave = currentUserId;
-        currentRoomName = null; currentUserDisplayName = null; // Nullify global state
+        currentRoomName = null; currentUserDisplayName = null; 
         if (!roomToLeave || !userToLeave || !db) {
              if(groupStatusEl) groupStatusEl.textContent = "Not in a room or user ID missing.";
         } else {
@@ -1060,13 +1046,15 @@ document.addEventListener('DOMContentLoaded', function() {
             statusEl.textContent = "Geolocation is not supported by your browser."; return; 
         }
         isRunning = true; isPaused = false;
-        rideStartTime = performance.now(); activeSegmentStartTime = rideStartTime;
-        lastProcessedDataTimestamp = rideStartTime; lastAltitudeApiCallTimestamp = 0; 
+        rideStartTime = performance.now(); 
+        activeSegmentStartTime = rideStartTime;
+        lastTickTime = rideStartTime; 
+        previousTickPerformanceTimestamp = rideStartTime; 
+        totalElapsedTimeMs = 0; 
         
         totalDistanceKm = 0; currentAltitudeM = null; previousAltitudeM = null; rawGpsAltitudeM = null; apiCorrectedAltitudeM = null;
         currentSpeedKmh = 0; currentCadenceRpm = (settings.defaultCadence || 80);
-        powerReadings = []; rideDataLog = []; totalElapsedTimeMs = 0; 
-        previousTickPerformanceTimestamp = null; // Reset for consistent time delta calc
+        powerReadings = []; rideDataLog = []; 
         previousLatitude = null; previousLongitude = null; 
         currentLatitude = null; currentLongitude = null; previousSpeedMsForSim = 0;
         currentWindSpeedMs = 0; currentWindDirectionDegrees = null; currentBikeBearingDegrees = null;
@@ -1085,6 +1073,7 @@ document.addEventListener('DOMContentLoaded', function() {
         statusEl.textContent = "Attempting to get GPS signal...";
         const geoOptions = { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 };
         geolocWatchId = navigator.geolocation.watchPosition(processPositionUpdate, handleLocationError, geoOptions);
+        
         setTimeout(() => {
             if (isRunning && currentLatitude !== null && currentLongitude !== null) {
                 fetchAndUpdateWeatherData(currentLatitude, currentLongitude);
@@ -1096,14 +1085,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 initializeMap(settings.defaultLat || 51.0447, settings.defaultLon || -114.0719);
             }
         }, 3000); 
+
         if (weatherApiUpdateInterval) clearInterval(weatherApiUpdateInterval);
         weatherApiUpdateInterval = setInterval(() => {
             if (isRunning && !isPaused && currentLatitude !== null && currentLongitude !== null) {
                 fetchAndUpdateWeatherData(currentLatitude, currentLongitude);
             }
         }, WEATHER_API_UPDATE_FREQUENCY_MS);
+
         if (failsafeTickInterval) clearInterval(failsafeTickInterval);
-        failsafeTickInterval = setInterval(ensurePeriodicUpdate, 1000); 
+        failsafeTickInterval = setInterval(ensurePeriodicUpdate, FORCED_TICK_INTERVAL_MS); 
+
         startRideButton.disabled = true; pauseSimButton.disabled = false;
         resumeSimButton.disabled = true; stopSimButton.disabled = false;
         requestWakeLock();
@@ -1115,6 +1107,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (failsafeTickInterval) clearInterval(failsafeTickInterval);
         if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval); 
         sendLocationToGroupInterval = null; 
+        
         pauseSimButton.disabled = true; resumeSimButton.disabled = false;
         statusEl.textContent = "Ride paused."; releaseWakeLock(); 
     });
@@ -1123,15 +1116,18 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!isRunning || !isPaused) return;
         isPaused = false;
         activeSegmentStartTime = performance.now(); 
-        previousTickPerformanceTimestamp = activeSegmentStartTime; // Reset for time delta
-        lastProcessedDataTimestamp = activeSegmentStartTime;
-        lastAltitudeApiCallTimestamp = performance.now(); // Prevent immediate API call
+        previousTickPerformanceTimestamp = activeSegmentStartTime; 
+        lastTickTime = activeSegmentStartTime; 
+        lastAltitudeApiCallTimestamp = performance.now(); 
+
         if (failsafeTickInterval) clearInterval(failsafeTickInterval);
-        failsafeTickInterval = setInterval(ensurePeriodicUpdate, 1000);
+        failsafeTickInterval = setInterval(ensurePeriodicUpdate, FORCED_TICK_INTERVAL_MS);
+
         if (currentRoomName && currentUserId) {
             if (sendLocationToGroupInterval) clearInterval(sendLocationToGroupInterval);
             sendLocationToGroupInterval = setInterval(sendMyLocationToGroup, GROUP_LOCATION_SEND_INTERVAL_MS);
         }
+
         pauseSimButton.disabled = false; resumeSimButton.disabled = true;
         statusEl.textContent = "Ride resumed."; requestWakeLock(); 
     });
