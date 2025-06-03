@@ -1,4 +1,4 @@
-// ride.js - Full file with Timestamp & Elapsed Time Fixes
+// ride.js - Full file with Improved Elapsed Time Accuracy
 
 document.addEventListener('DOMContentLoaded', function() {
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
@@ -68,9 +68,10 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentLongitude = null; 
     let wakeLock = null;
     let failsafeTickInterval = null;
-    let lastTickTime = 0; 
-    const FORCED_TICK_INTERVAL_MS = 1000; 
-    const MAX_SILENCE_BEFORE_FORCED_TICK_MS = 1500; 
+    let lastTickTime = 0; // performance.now() of the last time processPositionUpdate actually ran
+    const FORCED_TICK_INTERVAL_MS = 1000; // How often ensurePeriodicUpdate itself runs
+    const MAX_SILENCE_BEFORE_FORCED_TICK_MS = 950; // **MODIFIED:** Trigger synthetic if no GPS within 0.95s
+
     let currentWindSpeedMs = 0; 
     let currentWindDirectionDegrees = null; 
     let currentBikeBearingDegrees = null;   
@@ -474,33 +475,30 @@ document.addEventListener('DOMContentLoaded', function() {
         let timeDeltaS = 0;
         if (previousTickPerformanceTimestamp !== null) {
             timeDeltaS = (currentTickPerformanceTimestamp - previousTickPerformanceTimestamp) / 1000;
-        } else { // First tick of a segment
-            timeDeltaS = 0; // No delta for the very first point, or use a small default if calculations need it
+        } else { 
+            // First tick of a segment, no "previous" performance timestamp for delta yet.
+            // Elapsed time will start accumulating from the *next* tick.
+            // For calculations this tick, assume a small nominal delta if needed, or handle first point specially.
+            // For now, if previousTickPerformanceTimestamp is null, timeDeltaS remains 0.
+            // Calculations needing a positive timeDeltaS should handle this (e.g., default to 1.0 or skip).
         }
         
-        // Ensure timeDeltaS is reasonable
-        if (timeDeltaS < 0.01 && !position.synthetic && previousTickPerformanceTimestamp !== null) { 
-             if (currentLatitude === position.coords.latitude && currentLongitude === position.coords.longitude && 
-                 rawGpsAltitudeM === position.coords.altitude &&
-                 (position.coords.speed !== null ? (position.coords.speed * 3.6) : 0) === currentSpeedKmh ) {
-                previousTickPerformanceTimestamp = currentTickPerformanceTimestamp; 
-                return; 
+        // Ensure timeDeltaS is reasonable and positive for calculations
+        if (timeDeltaS <= 0) {
+            if (position.synthetic) { // Synthetic ticks are meant to be regular
+                timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000;
+            } else if (previousTickPerformanceTimestamp !== null) { // Real GPS, but timestamp issue
+                timeDeltaS = 0.05; // Force a small positive delta if somehow zero or negative
+                console.warn("Corrected non-positive timeDeltaS to 0.05s");
+            } else {
+                timeDeltaS = 0; // Truly the first point, no time has passed *before* it for this segment
             }
-            timeDeltaS = 0.05; 
         }
-        if (position.synthetic) {
-            // For synthetic ticks, delta is from last actual processed time to now.
-            // If previousTickPerformanceTimestamp is from a while ago, this delta could be large.
-            // We want the synthetic tick to represent roughly FORCED_TICK_INTERVAL_MS.
-            // So, if called by ensurePeriodicUpdate, the effective delta for accumulation should be ~1s.
-            // Let's ensure it's at least the forced interval if it's a synthetic tick.
-            let syntheticDelta = (currentTickPerformanceTimestamp - (previousTickPerformanceTimestamp || currentTickPerformanceTimestamp - FORCED_TICK_INTERVAL_MS)) / 1000;
-            timeDeltaS = Math.max(FORCED_TICK_INTERVAL_MS / 1000, syntheticDelta);
-            if (timeDeltaS > (FORCED_TICK_INTERVAL_MS / 1000) * 1.5) timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000; // Cap it
-        }
-        if (timeDeltaS <=0) timeDeltaS = FORCED_TICK_INTERVAL_MS / 1000; // Final fallback for positive delta
         
-        totalElapsedTimeMs += (timeDeltaS * 1000); 
+        // Only accumulate elapsed time if it's a meaningful delta (not the very first point of a segment)
+        if (previousTickPerformanceTimestamp !== null && timeDeltaS > 0) {
+             totalElapsedTimeMs += (timeDeltaS * 1000); 
+        }
         previousTickPerformanceTimestamp = currentTickPerformanceTimestamp; 
 
         const newLatitude = position.synthetic ? currentLatitude : position.coords.latitude;
@@ -520,8 +518,10 @@ document.addEventListener('DOMContentLoaded', function() {
             altitudeToUse = apiCorrectedAltitudeM;
         } else if (rawGpsAltitudeM !== null) { 
             altitudeToUse = rawGpsAltitudeM;
-        } else if (currentAltitudeM === null) { 
-            altitudeToUse = 100; 
+        } else if (currentAltitudeM === null && previousAltitudeM === null) { // Very first altitude reading
+            altitudeToUse = gpsProvidedAltitude !== null ? gpsProvidedAltitude : 100; 
+        } else if (currentAltitudeM === null && previousAltitudeM !== null) { // If current is somehow lost, use previous
+            altitudeToUse = previousAltitudeM;
         }
         
         const tempPrevCalcAltitude = previousAltitudeM === null ? altitudeToUse : previousAltitudeM;
@@ -536,13 +536,11 @@ document.addEventListener('DOMContentLoaded', function() {
             currentBikeBearingDegrees = calculateBearing(currentLatitude, currentLongitude, newLatitude, newLongitude);
         }
         
-        // Update global current lat/lon *after* using them as "previous" for bearing
         if (newLatitude !== null) currentLatitude = newLatitude;
         if (newLongitude !== null) currentLongitude = newLongitude;
         
-        // previousAltitudeM for NEXT tick's calculation should be the altitude WE USED this tick.
-        previousAltitudeM = currentAltitudeM; // Store what currentAltitudeM WAS
-        currentAltitudeM = altitudeToUse;     // Update currentAltitudeM to what's used for THIS tick
+        previousAltitudeM = currentAltitudeM; 
+        currentAltitudeM = altitudeToUse;     
         
         let gpsSpeedMs = position.coords && position.coords.speed !== null ? position.coords.speed : 0;
         if (position.synthetic) gpsSpeedMs = 0;
@@ -571,7 +569,7 @@ document.addEventListener('DOMContentLoaded', function() {
         } else { currentGearRatio = null; }
 
         let distanceThisTickKm = 0;
-        if (timeDeltaS > 0) {
+        if (timeDeltaS > 0) { // Only add distance if time has passed
             distanceThisTickKm = (currentSpeedKmh / 3600) * timeDeltaS;
             totalDistanceKm += distanceThisTickKm;
         }
@@ -585,7 +583,7 @@ document.addEventListener('DOMContentLoaded', function() {
             altitudeM: currentAltitudeM, 
             previousAltitudeM: tempPrevCalcAltitude, 
             cadenceRpm: currentCadenceRpm,
-            timeDeltaS: timeDeltaS, 
+            timeDeltaS: timeDeltaS > 0 ? timeDeltaS : 0.01, // Ensure positive for calculations
             gradientPercent: 0,
             bikeBearingDegrees: currentBikeBearingDegrees,
             windSpeedMs: currentWindSpeedMs,
@@ -820,7 +818,6 @@ document.addEventListener('DOMContentLoaded', function() {
             if (i > 0) {
                 const prevPoint = recalculatedLog[i-1];
                 prevCorrectedAltForRecalc = parseFloat(prevPoint.z_altitude_corrected_api || prevPoint.z_altitude_used);
-                // Use the logged time_delta_s if available and valid, otherwise assume 1s based on timestamp
                 if (currentPoint.time_delta_s && parseFloat(currentPoint.time_delta_s) > 0) {
                     timeDeltaSRecalc = parseFloat(currentPoint.time_delta_s);
                 } else if (parseFloat(currentPoint.timestamp) > parseFloat(prevPoint.timestamp)) { 
