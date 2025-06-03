@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cycling Power Calculator - Settings</title>
+    <style>
+        /* Basic styling for readability - can be expanded later */
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h1, h2 { color: #333; }
+        .parameter-group { margin-bottom: 20px; border: 1px solid #ddd; padding: 15px; border-radius: 5px; }
+        .parameter-group h3 { margin-top: 0; color: #555; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="number"], input[type="text"] {
+            width: calc(100% - 22px); /* Adjust for padding and border */
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background-color: #0056b3; }
+        .cda-options label { font-weight: normal; margin-left: 10px; }
+        .cda-options input[type="radio"] { margin-right: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Cycling Power Calculator</h1>
+        <h2>Ride Settings</h2>
+        <p>Adjust your parameters below. These will be used for power calculations.</p>
+
+        <div class="parameter-group">
+            <h3>Rider & Bike</h3>
+            <label for="systemMass">Total System Mass (rider + bike + kit) (kg):</label>
+            <input type="number" id="systemMass" step="0.1">
+
+            <label for="wheelCircumference">Wheel Circumference (mm):</label>
+            <input type="number" id="wheelCircumference" step="1">
+        </div>
+
+        <div class="parameter-group">
+            <h3>Resistance Factors</h3>
+            <label for="crr">Coefficient of Rolling Resistance (C<sub>rr</sub>):</label>
+            <input type="number" id="crr" step="0.0001">
+
+            <label for="cda">Aerodynamic Drag Area (C<sub>d</sub>A) (m<sup>2</sup>):</label>
+            <input type="number" id="cda" step="0.001">
+            
+            <div class="cda-options">
+                <h4>Quick C<sub>d</sub>A Presets (select one to populate C<sub>d</sub>A field):</h4>
+                <input type="radio" id="cdaHoods" name="cdaPreset" value="hoods"> <label for="cdaHoods">Hoods</label><br>
+                <input type="radio" id="cdaDrops" name="cdaPreset" value="drops"> <label for="cdaDrops">Drops</label><br>
+                <input type="radio" id="cdaOutOfSaddle" name="cdaPreset" value="outOfSaddle"> <label for="cdaOutOfSaddle">Out of Saddle (Climbing)</label><br>
+            </div>
+        </div>
+
+        <div class="parameter-group">
+            <h3>Air Density (Optional override)</h3>
+            <label for="airDensity">Air Density (ρ) (kg/m<sup>3</sup>) (leave blank for default):</label>
+            <input type="number" id="airDensity" step="0.001" placeholder="e.g., 1.225">
+        </div>
+        
+        <button id="saveSettings">Save Settings & Proceed to Ride</button>
+        <p id="statusMessage" style="margin-top:10px; color: green;"></p>
+
+    </div>
+
+    <script src="settings.js"></script> </body>
+</html>
