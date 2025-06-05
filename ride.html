@@ -30,7 +30,7 @@
         }
         .container { 
             background-color: #fff; 
-            padding: 15px; /* Slightly reduced padding for the main container */
+            padding: 15px;
             margin-top:10px; 
             border-radius: 8px; 
             box-shadow: 0 0 10px rgba(0,0,0,0.1); 
@@ -39,44 +39,43 @@
         }
         .metrics-grid { 
             display: grid; 
-            /* Allow more columns on wider screens, but make min item width smaller */
-            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); /* Reduced minmax */
-            gap: 10px; /* Reduced gap */
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); 
+            gap: 10px; 
             margin-bottom: 15px; 
         }
         .metric-item { 
             background-color: #e9ecef; 
-            padding: 10px; /* Reduced padding */
+            padding: 10px; 
             border-radius: 5px; 
             text-align: center; 
         }
         .metric-item h3 { 
             margin-top: 0; 
-            margin-bottom: 3px; /* Reduced margin */
-            font-size: 0.8em;  /* Reduced font size */
+            margin-bottom: 3px; 
+            font-size: 0.8em;  
             color: #555; 
-            font-weight: normal; /* Less emphasis on label */
+            font-weight: normal; 
         }
         .metric-item p { 
             margin-bottom: 0; 
-            font-size: 1.5em; /* Reduced font size */
+            font-size: 1.5em; 
             font-weight: bold; 
             color: #007bff; 
-            line-height: 1.2; /* Adjust line height */
+            line-height: 1.2; 
         }
         .controls {
-            text-align: center; /* Center buttons */
+            text-align: center; 
             margin-bottom: 10px;
         }
         .controls button { 
             background-color: #28a745; 
             color: white; 
-            padding: 8px 12px; /* Slightly reduced padding */
+            padding: 8px 12px; 
             border: none; 
             border-radius: 4px; 
             cursor: pointer; 
-            font-size: 0.9em; /* Slightly reduced font size */
-            margin: 5px 3px; /* Adjust margins */
+            font-size: 0.9em; 
+            margin: 5px 3px; 
         }
         .controls button.pause { background-color: #ffc107; }
         .controls button.stop { background-color: #dc3545; }
@@ -84,13 +83,13 @@
 
         #mapDisplay { 
             width: 100%; 
-            height: 250px; /* Can adjust height as needed */
+            height: 250px;
             background-color: #ddd; 
             margin-bottom: 15px; 
             border-radius: 5px; 
             border: 1px solid #ccc;
         }
-        .parameter-group { /* Style for sensor and group sections */
+        .parameter-group { 
             margin-bottom: 15px; 
             border: 1px solid #eee; 
             padding: 10px; 
@@ -121,14 +120,13 @@
             font-size: 0.9em; padding: 6px 10px; margin-top: 5px;
         }
 
-
         .settings-display { 
             background-color: #f9f9f9; 
             padding: 10px; 
             border: 1px solid #eee; 
             border-radius: 5px; 
             margin-top:15px; 
-            font-size:0.8em; /* Smaller font for settings display */
+            font-size:0.8em; 
         }
         .settings-display h4 {margin-top:0; margin-bottom: 5px;}
         #status { margin-top: 10px; font-style: italic; font-size: 0.9em; }
@@ -136,7 +134,7 @@
 </head>
 <body>
     <header>
-        <h1>Live Ride</h1> <!-- Changed title slightly -->
+        <h1>Live Ride</h1>
     </header>
 
     <div class="container">
@@ -195,7 +193,7 @@
 
         <div class="controls">
             <button id="startRideButton">Start GPS Ride</button>
-            <button id="pauseSimButton" class="pause" disabled>Pause</button> <!-- Consider renaming IDs if not a simulation -->
+            <button id="pauseSimButton" class="pause" disabled>Pause</button>
             <button id="resumeSimButton" class="pause" disabled>Resume</button>
             <button id="stopSimButton" class="stop" disabled>Stop & Show Summary</button>
         </div>
@@ -230,7 +228,6 @@
             <p>Group Status: <span id="groupStatus">Not in a room.</span></p>
         </div>
 
-
         <div class="settings-display">
             <h4>Using Settings:</h4>
             <pre id="currentSettingsText"></pre>
@@ -244,7 +241,6 @@
 	<script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-firestore-compat.js"></script>
 
 	<script>
-	  // Your web app's Firebase configuration - REPLACE WITH YOUR ACTUAL CONFIG
 	  const firebaseConfig = {
 		apiKey: "AIzaSyAYD2EHeq-FXi2IcD_sEyMX2hQ8GOjBpHQ",
 		authDomain: "group-ride-7ae51.firebaseapp.com",
@@ -255,10 +251,9 @@
 		measurementId: "G-7FN0E4SEZ2"
 	  };
 
-	  // Initialize Firebase
 	  firebase.initializeApp(firebaseConfig);
 	  const auth = firebase.auth();
-	  const db = firebase.firestore(); // Using Firestore
+	  const db = firebase.firestore();
 	</script>
 
 	<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
